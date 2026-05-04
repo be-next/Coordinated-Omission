@@ -1,7 +1,14 @@
 # Scenario 02 — single hiccup
 
-The canonical case from the blog post: a 60-second test against a server
-that stalls for **one second at t=30 s**, then resumes normal operation.
+> Companion material for the article *Coordinated Omission: Why Your
+> Latency Numbers Lie* —
+> [idle-ti.me/blog/coordinated-omission/](https://idle-ti.me/blog/coordinated-omission/).
+
+The canonical case from the blog post. A 60-second test runs against a
+server that stalls for **one second at t=30 s**, then resumes normal
+operation. Eight load tools probe the run; closed-loop tools
+systematically hide the stall, open-loop tools systematically expose
+it. The gap at p99 is two orders of magnitude.
 
 ## Profile
 
@@ -9,38 +16,99 @@ that stalls for **one second at t=30 s**, then resumes normal operation.
 |------------------|-----------|
 | Test duration    | 60 s      |
 | Target rate      | 1 000 rps |
-| Baseline latency | 1 ms      |
+| Baseline latency | 10 ms     |
 | Hiccup start     | t=30 s    |
 | Hiccup duration  | 1 000 ms  |
 
-The hiccup is scheduled by the server itself via `-hiccup-at 30s
--hiccup-duration 1s`. The load tools do not need to know about it; the
-point of the scenario is precisely that they should *report* it correctly.
+## Server pathology
 
-## Expected outcome
+A single 1-second pause is scheduled by the server at `t = 30 s`:
 
-| Tool   | Reported p99   | Reported p99.9 | Honest? |
-|--------|----------------|----------------|---------|
-| `ab`   | ~5 ms          | ~50–500 ms     | no — only requests already in flight see the stall |
-| `wrk2` | several 100 ms | ~900 ms        | yes — queued requests carry intended-start-time correction |
+```
+co-server -hiccup-at 30s -hiccup-duration 1s
+```
 
-Numbers above are illustrative; exact values depend on hardware and
-configured concurrency. What matters is the *shape* of the difference,
-not the digits.
+Implementation: every `/api` request takes a read-lock on a
+`sync.RWMutex`; at t=30 s a goroutine takes the write-lock for one
+second. All requests that arrive during the pause queue at the gate
+and unblock together when the pause ends — the same shape as a
+stop-the-world GC pause from the client side. See `server/main.go`.
+
+## Tools exercised
+
+All eight load tools defined in `load-tools/`:
+
+| Closed loop                        | Open loop                                    |
+|------------------------------------|-----------------------------------------------|
+| `ab`                               | `vegeta`                                     |
+| `wrk`                              | `k6` — `constant-arrival-rate` executor      |
+| `hey`                              | `JMeter` — *Precise Throughput Timer*        |
+| `k6` — `constant-vus` executor     |                                              |
+| `JMeter` — default ThreadGroup     |                                              |
+
+The ninth tool — `wrk2` — is wired but does not build on Apple Silicon;
+see the repository [README](../../README.md).
+
+## What this scenario demonstrates
+
+The structural lie of closed-loop benchmarks under a server slowdown:
+
+- **At p50–p95:** all eight tools agree to within rounding. The body of
+  the distribution is unaffected by coordinated omission.
+- **At p99:** the divergence appears. Closed-loop tools still report a
+  near-baseline latency (~12–19 ms) because only the few requests that
+  were in flight at the start of the stall observe it. Open-loop tools
+  report a tail latency in the hundreds of milliseconds, reflecting the
+  ~1 000 requests that *would have arrived* during the stall in a real
+  open workload.
+- **At p99.9 and beyond:** all tools eventually surface the 1-second
+  stall, but only because the stall is so long relative to the total
+  sample count that it cannot be hidden any longer. Production users
+  hit the wall at p99, not p99.9.
+
+This is the empirical illustration of the article's central claim.
 
 ## How to run
 
 ```sh
-# from the repository root, in two terminals
-make run-server                                    # terminal 1: starts the server with the hiccup scheduled
-make run-scenario-02                               # terminal 2: launches ab and wrk2 in turn
+make scenario-02            # build, run all eight tools, stop the server
+make build-images-02        # render comparison plots into images/02-single-hiccup/
 ```
 
-Or scripted, from the repository root:
+Each tool starts and stops its own copy of the server, so the hiccup
+fires at t=30 s relative to the start of *each* runner.
 
-```sh
-make scenario-02                                   # builds, starts server, runs both tools, stops server
-```
+## Expected outcome
 
-Raw outputs land in `results/02-single-hiccup/`. The analysis pipeline
-turns them into the comparison images in `images/02-single-hiccup/`.
+| Percentile | closed-loop tools | open-loop tools |
+|------------|-------------------|-----------------|
+| p50        | ~10–12 ms         | ~10 ms          |
+| p95        | ~12–15 ms         | ~10 ms          |
+| **p99**    | **~12–19 ms**     | **~400–450 ms** |
+| p99.9      | ~1 000 ms         | ~950 ms         |
+| p99.99     | ~1 000 ms         | ~1 000 ms       |
+
+Numbers are illustrative; exact values depend on hardware and tool
+configuration. What matters is the *shape* of the difference at p99
+between the two groups, not the precise digits.
+
+`wrk` is a borderline case: its `--latency` HDR output reports a tail
+much closer to the open-loop tools (~400 ms at p99) despite being
+conventionally classified as closed-loop. See the repository
+[README](../../README.md).
+
+## Generated images
+
+After `make build-images-02`, four SVGs are written into
+`images/02-single-hiccup/`:
+
+| File                                  | Content                                                 |
+|---------------------------------------|---------------------------------------------------------|
+| `closed-vs-open-percentiles.svg`      | the canonical pair — `ab` vs Vegeta                     |
+| `k6-bad-vs-good.svg`                  | the article's worked example — k6 in both modes         |
+| `jmeter-bad-vs-good.svg`              | the JMeter equivalent — ThreadGroup vs Throughput Timer |
+| `all-tools.svg`                       | all eight tools together                                |
+
+In every plot of this scenario, two clusters of curves separate
+sharply at p99: closed-loop tools stay along the baseline, open-loop
+tools rise toward the stall duration.

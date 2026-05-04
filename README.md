@@ -20,35 +20,58 @@ reports depending on whether the load tool coordinates with the server or not.
 ## Quick start
 
 ```sh
-make mvp                       # build the server, run the canonical scenario,
-                               # produce the comparison images
-open images/02-single-hiccup/  # inspect the result
+make setup                       # one-time: install Python deps in a local venv
+make scenario-02                 # the canonical case: 8 tools against a 1 s hiccup
+make build-images-02             # render the four SVGs into images/02-single-hiccup/
+open images/02-single-hiccup/    # inspect the result
 ```
+
+`make help` lists the five scenarios and the matching `build-images`
+target for each.
 
 ## Layout
 
 ```
-server/                     Go HTTP server, hiccup is scheduled by query string
-scenarios/                  one folder per scenario, holds run scripts and notes
-  02-single-hiccup/         the canonical case from the blog post
-load-tools/                 one folder per load tool (ab, wrk2, ...)
-analysis/                   Python scripts that parse results and render images
-images/                     versioned, generated illustrations (one folder per scenario)
-results/                    raw outputs of the most recent run (gitignored)
+server/                          Go HTTP server, the system under test;
+                                 pathology selected by command-line flags
+  main.go                          flags: -hiccup-at, -ramp-*,
+                                          -gc-pause-*, -max-concurrency
+scenarios/                       one folder per scenario, with its own
+                                 README explaining the pathology and the
+                                 expected outcome
+  01-healthy/                      control: server stays well-behaved
+  02-single-hiccup/                one 1 s stall at t=30 s
+  03-sustained-slowdown/           baseline ramps 10 ms → 100 ms
+  04-gc-pauses/                    200 ms gate-hold every 10 s
+  05-saturation/                   server has a hard concurrency cap
+load-tools/                      one folder per load tool, with a runner
+  ab/        wrk/        hey/      closed-loop tools
+  vegeta/    wrk2/                 open-loop tools
+  k6-bad/    k6-good/              k6 in both modes (the article's example)
+  jmeter-bad/  jmeter-good/        JMeter in both modes
+analysis/                        Python scripts that parse results and
+                                 render the percentile-distribution plots
+  generate_images.py               main entry point
+  requirements.txt                 matplotlib + numpy
+images/                          versioned, generated illustrations,
+                                 one subfolder per scenario, four SVGs each
+results/                         raw measurement outputs (gitignored)
+Makefile                         orchestration: run, render, publish
 ```
 
-## Status
+## Scenarios
 
-The repository is built up incrementally. The MVP demonstrates the canonical
-case end-to-end with two load tools.
+Five scenarios; each one isolates a different server pathology so that
+the same eight tools can be compared against it. Open the matching
+`scenarios/<NN>/README.md` for the full per-scenario story.
 
-| Scenario              | Status | What it shows                                                          |
-|-----------------------|--------|------------------------------------------------------------------------|
-| 01-healthy            | done   | Closed and open loops agree when the server is OK                      |
-| 02-single-hiccup      | done   | One 1 s stall at t=30 s — the canonical case                           |
-| 03-sustained-slowdown | done   | Baseline ramps 10 ms → 100 ms between t=20 s and t=50 s                |
-| 04-gc-pauses          | done   | 200 ms gate-hold every 10 s (six pauses across the test)               |
-| 05-saturation         | done   | Server has a concurrency cap; default cap is non-binding (see scenario README for the saturated profile) |
+| Scenario              | What it shows                                                          |
+|-----------------------|------------------------------------------------------------------------|
+| 01-healthy            | Control: closed and open loops agree when the server is OK            |
+| 02-single-hiccup      | One 1 s stall at t=30 s — the canonical case from the article        |
+| 03-sustained-slowdown | Baseline ramps 10 ms → 100 ms between t=20 s and t=50 s              |
+| 04-gc-pauses          | 200 ms gate-hold every 10 s (six pauses across the test)              |
+| 05-saturation         | Concurrency cap; default cap is non-binding, see scenario for tuning |
 
 | Load tool                                  | Default model              | CO-aware? | Status |
 |--------------------------------------------|----------------------------|-----------|--------|
@@ -83,8 +106,6 @@ across a 1 s stall.
 
 ## Prerequisites
 
-The MVP needs:
-
 - `go` 1.22+ (to build the server) — `brew install go`
 - `ab` (Apache Bench) — ships with macOS, also `apt-get install apache2-utils`
 - `vegeta` — `go install github.com/tsenart/vegeta/v12@latest`
@@ -97,14 +118,14 @@ The MVP needs:
 - `python3` 3.10+ — `make setup` creates a local venv and pip-installs
   matplotlib and numpy
 
+Run `make check-tools` to see which of the above are present on your
+system.
+
 `wrk2` is supported by the runner in `load-tools/wrk2/` but **does not build
 out of the box on Apple Silicon**: the LuaJIT vendored in `giltene/wrk2`
 predates arm64. The repository falls back to Vegeta as the open-loop
 reference. If you have a working `wrk2` binary, the analysis pipeline picks
 it up automatically.
-
-Subsequent scenarios will exercise sustained slowdowns, recurring GC
-pauses, and saturation regimes (see status table above).
 
 ## Reproducing the blog illustrations
 

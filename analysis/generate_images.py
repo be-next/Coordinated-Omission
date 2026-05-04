@@ -357,8 +357,13 @@ def _percentile_values(sorted_samples: np.ndarray, percentiles: np.ndarray) -> n
 
 
 def plot_comparison(series: list[PercentileSeries], out_path: Path, title: str) -> None:
+    # The legend lives outside the plot area, anchored to the right edge.
+    # The previous in-plot placement collided with the tail-rising portion
+    # of the curves once the open-loop tools climb to ~1 000 ms. Reserving
+    # a fixed right gutter ensures the legend never covers data, regardless
+    # of whether two or eight series are drawn.
     n = len(series)
-    figsize = (10.5, 6.5) if n > 4 else (9, 5.5)
+    figsize = (12.5, 6.5) if n > 4 else (10.5, 5.5)
     fig, ax = plt.subplots(figsize=figsize, dpi=120)
     for s in series:
         x = 1.0 / np.maximum(1.0 - s.percentiles, 1e-6)
@@ -379,15 +384,15 @@ def plot_comparison(series: list[PercentileSeries], out_path: Path, title: str) 
     ax.set_ylabel("latency (ms)")
     ax.set_title(f"{title}\n{subtitle}")
     ax.grid(True, which="both", alpha=0.3)
-    legend_loc = "upper left" if n <= 4 else "center left"
-    ax.legend(loc=legend_loc, framealpha=0.9, fontsize="small")
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0),
+              framealpha=0.9, fontsize="small", borderaxespad=0)
 
     xticks = [1, 2, 10, 100, 1_000, 10_000, 100_000]
     xlabels = ["0%", "50%", "90%", "99%", "99.9%", "99.99%", "99.999%"]
     ax.set_xticks(xticks)
     ax.set_xticklabels(xlabels)
 
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 0.78 if n > 4 else 0.74, 1.0))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path)
     plt.close(fig)
