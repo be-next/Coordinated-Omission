@@ -44,21 +44,32 @@ case end-to-end with two load tools.
 
 | Scenario              | Status | What it shows                                     |
 |-----------------------|--------|---------------------------------------------------|
-| 01-healthy            | TODO   | Closed and open loops agree when the server is OK |
-| 02-single-hiccup      | MVP    | One 1 s stall at t=30 s — the canonical case      |
+| 01-healthy            | done   | Closed and open loops agree when the server is OK |
+| 02-single-hiccup      | done   | One 1 s stall at t=30 s — the canonical case      |
 | 03-sustained-slowdown | TODO   | Progressive degradation                           |
 | 04-gc-pauses          | TODO   | Recurring short pauses                            |
 | 05-saturation         | TODO   | Target rate exceeds capacity                      |
 
-| Load tool | Default model        | CO-aware? | Status |
-|-----------|----------------------|-----------|--------|
-| ab        | closed loop          | no        | MVP    |
-| Vegeta    | open (constant rate) | yes       | MVP    |
-| wrk       | closed loop          | no        | TODO   |
-| wrk2      | open (constant rate) | yes       | wired but unbuilt on Apple Silicon (see below) |
-| hey       | closed loop          | no        | TODO   |
-| k6        | depends on executor  | configurable | TODO |
-| JMeter    | closed loop (default)| configurable | TODO |
+| Load tool                         | Default model              | CO-aware? | Status |
+|-----------------------------------|----------------------------|-----------|--------|
+| ab                                | closed loop                | no        | done   |
+| Vegeta                            | open (constant rate)       | yes       | done   |
+| k6 — `constant-vus`               | closed loop                | no        | done   |
+| k6 — `constant-arrival-rate`      | open (constant rate)       | yes       | done   |
+| wrk                               | closed loop                | no        | TODO   |
+| wrk2                              | open (constant rate)       | yes       | wired but unbuilt on Apple Silicon (see below) |
+| hey                               | closed loop                | no        | TODO   |
+| JMeter (default)                  | closed loop                | no        | TODO   |
+| JMeter + Constant Throughput Timer| open (configurable)        | yes       | TODO   |
+
+**A k6 footgun worth knowing.** The `constant-arrival-rate` executor is
+only honest if `preAllocatedVUs` and `maxVUs` are large enough to absorb
+the slow-down peak. If the pool saturates, k6 reports
+`dropped_iterations` and silently *omits* the queued requests —
+partially reintroducing coordinated omission while *advertising* an
+open-loop model. The default `script.js` in `load-tools/k6-good/`
+pre-allocates 1 500 VUs with a ceiling of 5 000 to be safe at 1 000 rps
+across a 1 s stall.
 
 ## Prerequisites
 
@@ -69,6 +80,7 @@ The MVP needs:
 - `vegeta` — `go install github.com/tsenart/vegeta/v12@latest`
   (binary lands in `$HOME/go/bin/vegeta`; the runner finds it there even
   if `$HOME/go/bin` is not on `PATH`)
+- `k6` 0.50+ — `brew install k6`
 - `python3` 3.10+ — `make setup` creates a local venv and pip-installs
   matplotlib and numpy
 
@@ -78,7 +90,7 @@ predates arm64. The repository falls back to Vegeta as the open-loop
 reference. If you have a working `wrk2` binary, the analysis pipeline picks
 it up automatically.
 
-Subsequent scenarios will add `wrk`, `hey`, `k6`, and `jmeter`.
+Subsequent scenarios will add `wrk`, `hey`, and `jmeter`.
 
 ## Reproducing the blog illustrations
 

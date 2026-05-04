@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import os
 import re
@@ -113,6 +114,51 @@ def parse_vegeta_hdr(path: Path) -> PercentileSeries | None:
     return _parse_hdr(path, 1.0, "Vegeta (open loop, constant rate)")
 
 
+_K6_PCT_RE = re.compile(r"^p\((\d+(?:\.\d+)?)\)$")
+
+
+def parse_k6_summary(path: Path, label: str) -> PercentileSeries | None:
+    """Parse the percentile aggregates produced by `k6 --summary-export`.
+
+    The summary lists discrete keys (min, p(50), p(75), p(90), p(95),
+    p(99), p(99.5), p(99.9), p(99.99), max). That is enough density for
+    the comparison plot — extreme tails come from the same hiccup samples
+    as the other tools.
+    """
+    if not path.exists():
+        return None
+    with path.open() as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError:
+            return None
+    metric = data.get("metrics", {}).get("http_req_duration")
+    if not isinstance(metric, dict):
+        return None
+    pairs: list[tuple[float, float]] = []
+    if "min" in metric:
+        pairs.append((0.0, float(metric["min"])))
+    for key, value in metric.items():
+        m = _K6_PCT_RE.match(key)
+        if not m:
+            continue
+        try:
+            p = float(m.group(1)) / 100.0
+        except ValueError:
+            continue
+        pairs.append((p, float(value)))
+    # Anchor the curve close to 1.0 with the observed max, without using
+    # p=1.0 exactly (which would give infinite 1/(1-p) on the log axis).
+    if "max" in metric:
+        pairs.append((0.99999, float(metric["max"])))
+    if not pairs:
+        return None
+    pairs.sort()
+    pct = np.array([p for p, _ in pairs])
+    lat = np.array([l for _, l in pairs])
+    return PercentileSeries(label, pct, lat)
+
+
 def parse_wrk2_txt(path: Path) -> PercentileSeries | None:
     """Fallback parser for wrk2 stdout when --latency is set.
 
@@ -189,7 +235,32 @@ def synthetic_open_loop() -> PercentileSeries:
     queue_lat = np.clip(queue_lat, _SYNTH_BASELINE_MS, None)
     samples = np.sort(np.concatenate([baseline, queue_lat]))
     lat = _percentile_values(samples, PERCENTILES)
-    return PercentileSeries("wrk2 (open loop, constant rate)", PERCENTILES.copy(), lat, synthetic=True)
+    return PercentileSeries("Vegeta (open loop, constant rate)", PERCENTILES.copy(), lat, synthetic=True)
+
+
+def synthetic_healthy(label: str, seed: int) -> PercentileSeries:
+    """Healthy-server distribution: baseline plus a small gamma jitter.
+
+    Used as the control series for scenario 01 when no measured data is
+    available. Both the closed-loop and open-loop synthetic series share
+    this shape — the whole point of the control is that they agree.
+    """
+    rng = np.random.default_rng(seed)
+    samples = np.sort(_SYNTH_BASELINE_MS + rng.gamma(shape=2.0, scale=1.0, size=_SYNTH_TOTAL))
+    lat = _percentile_values(samples, PERCENTILES)
+    return PercentileSeries(label, PERCENTILES.copy(), lat, synthetic=True)
+
+
+def synthetic_closed_loop_k6() -> PercentileSeries:
+    s = synthetic_closed_loop()
+    s.label = "k6 constant-vus (closed loop)"
+    return s
+
+
+def synthetic_open_loop_k6() -> PercentileSeries:
+    s = synthetic_open_loop()
+    s.label = "k6 constant-arrival-rate (open loop)"
+    return s
 
 
 def _percentile_values(sorted_samples: np.ndarray, percentiles: np.ndarray) -> np.ndarray:
@@ -233,40 +304,99 @@ def plot_comparison(series: list[PercentileSeries], out_path: Path, title: str) 
     print(f"[images] wrote {out_path.relative_to(REPO_ROOT)}")
 
 
-def render_scenario_02(mode: str) -> int:
-    results_dir = REPO_ROOT / "results" / "02-single-hiccup"
-    images_dir = REPO_ROOT / "images" / "02-single-hiccup"
+def _series_with_fallback(real, synthetic_fn, mode: str):
+    if real is not None:
+        return real
+    if mode != "real":
+        return synthetic_fn()
+    return None
 
-    if mode != "synthetic":
-        ab_series = parse_ab_csv(results_dir / "ab" / "percentiles.csv")
-        # Prefer Vegeta when available; fall back to wrk2 if the user has
-        # one but not the other.
-        open_series = (
+
+def _suffix_for(series: list[PercentileSeries]) -> str:
+    n_synth = sum(1 for s in series if s.synthetic)
+    if n_synth == 0:
+        return ""
+    if n_synth == len(series):
+        return "-synthetic"
+    return "-mixed"
+
+
+def _render(scenario: str, title: str, mode: str,
+            synth_ab, synth_open, synth_k6_bad, synth_k6_good) -> int:
+    results_dir = REPO_ROOT / "results" / scenario
+    images_dir = REPO_ROOT / "images" / scenario
+
+    if mode == "synthetic":
+        ab = open_ = k6_bad = k6_good = None
+    else:
+        ab = parse_ab_csv(results_dir / "ab" / "percentiles.csv")
+        open_ = (
             parse_vegeta_hdr(results_dir / "vegeta" / "vegeta.hdr")
             or parse_wrk2_hdr(results_dir / "wrk2" / "wrk2.hdr")
             or parse_wrk2_txt(results_dir / "wrk2" / "wrk2.txt")
         )
-    else:
-        ab_series = None
-        open_series = None
+        k6_bad = parse_k6_summary(results_dir / "k6-bad" / "summary.json",
+                                  "k6 constant-vus (closed loop)")
+        k6_good = parse_k6_summary(results_dir / "k6-good" / "summary.json",
+                                   "k6 constant-arrival-rate (open loop)")
 
-    if ab_series is None and mode != "real":
-        ab_series = synthetic_closed_loop()
-    if open_series is None and mode != "real":
-        open_series = synthetic_open_loop()
+    ab = _series_with_fallback(ab, synth_ab, mode)
+    open_ = _series_with_fallback(open_, synth_open, mode)
+    k6_bad = _series_with_fallback(k6_bad, synth_k6_bad, mode)
+    k6_good = _series_with_fallback(k6_good, synth_k6_good, mode)
 
-    if ab_series is None or open_series is None:
-        print("[images] missing real data; rerun with --mode auto or run the scenario first", file=sys.stderr)
+    if any(s is None for s in (ab, open_, k6_bad, k6_good)):
+        print(f"[images] {scenario}: missing real data; run the scenario first or use --mode synthetic", file=sys.stderr)
         return 1
 
-    n_synth = sum(1 for s in (ab_series, open_series) if s.synthetic)
-    suffix = {0: "", 1: "-mixed", 2: "-synthetic"}[n_synth]
+    all_series = [ab, k6_bad, open_, k6_good]
     plot_comparison(
-        [ab_series, open_series],
-        images_dir / f"closed-vs-open-percentiles{suffix}.svg",
-        "Single 1 s hiccup — closed loop vs. open loop",
+        all_series,
+        images_dir / f"all-tools{_suffix_for(all_series)}.svg",
+        f"{title} — four tools",
+    )
+
+    # k6-only plot reproduces the worked example from the blog post
+    # (closed-loop constant-vus vs open-loop constant-arrival-rate).
+    k6_pair = [k6_bad, k6_good]
+    plot_comparison(
+        k6_pair,
+        images_dir / f"k6-bad-vs-good{_suffix_for(k6_pair)}.svg",
+        f"{title} — k6 constant-vus vs constant-arrival-rate",
+    )
+
+    # Original 2-tool plot kept for backwards compatibility with the blog.
+    pair = [ab, open_]
+    plot_comparison(
+        pair,
+        images_dir / f"closed-vs-open-percentiles{_suffix_for(pair)}.svg",
+        f"{title} — ab vs Vegeta",
     )
     return 0
+
+
+def render_scenario_01(mode: str) -> int:
+    return _render(
+        "01-healthy",
+        "Healthy server (control)",
+        mode,
+        lambda: synthetic_healthy("ab (closed loop)", seed=11),
+        lambda: synthetic_healthy("Vegeta (open loop, constant rate)", seed=12),
+        lambda: synthetic_healthy("k6 constant-vus (closed loop)", seed=13),
+        lambda: synthetic_healthy("k6 constant-arrival-rate (open loop)", seed=14),
+    )
+
+
+def render_scenario_02(mode: str) -> int:
+    return _render(
+        "02-single-hiccup",
+        "Single 1 s hiccup",
+        mode,
+        synthetic_closed_loop,
+        synthetic_open_loop,
+        synthetic_closed_loop_k6,
+        synthetic_open_loop_k6,
+    )
 
 
 def main() -> int:
@@ -278,10 +408,14 @@ def main() -> int:
                              "auto (default): use measured data when present, fall back to synthetic.")
     args = parser.parse_args()
 
-    if args.scenario != "02-single-hiccup":
+    renderers = {
+        "01-healthy": render_scenario_01,
+        "02-single-hiccup": render_scenario_02,
+    }
+    if args.scenario not in renderers:
         print(f"[images] scenario {args.scenario} not implemented yet", file=sys.stderr)
         return 2
-    return render_scenario_02(args.mode)
+    return renderers[args.scenario](args.mode)
 
 
 if __name__ == "__main__":

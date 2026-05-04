@@ -22,17 +22,24 @@ SYS_PYTHON      := python3
 # or prerequisite list — only inside shell command bodies, where it is quoted.
 BLOG_IMG_DIR    := /Users/jerome/Share/Dropbox/16 - dev/11 - idle-time web site/idle-ti.me/content/blog/coordinated-omission/img
 
-.PHONY: help setup mvp scenario-02 scenario-02-ab scenario-02-wrk2 \
-        scenario-02-vegeta build-server run-server stop-server \
-        build-images-02 build-images publish-blog clean check-tools
+.PHONY: help setup mvp \
+        scenario-01 scenario-01-ab scenario-01-vegeta \
+        scenario-01-k6-bad scenario-01-k6-good \
+        scenario-02 scenario-02-ab scenario-02-wrk2 scenario-02-vegeta \
+        scenario-02-k6-bad scenario-02-k6-good \
+        build-server run-server stop-server \
+        build-images-01 build-images-02 build-images publish-blog \
+        clean check-tools
 
 help:
 	@echo "Targets:"
 	@echo "  make check-tools          # report which load tools are installed"
 	@echo "  make setup                # pip install Python deps for the analysis pipeline"
 	@echo "  make mvp                  # run the canonical scenario end-to-end and render images"
-	@echo "  make scenario-02          # ab + wrk2 against a fresh server with a 1s hiccup at t=30s"
-	@echo "  make build-images-02      # render images from current results (or synthetic if missing)"
+	@echo "  make scenario-01          # ab + Vegeta against a healthy server (control)"
+	@echo "  make scenario-02          # ab + Vegeta against a server with a 1s hiccup at t=30s"
+	@echo "  make build-images-01      # render images for scenario 01 (or synthetic if missing)"
+	@echo "  make build-images-02      # render images for scenario 02 (or synthetic if missing)"
 	@echo "  make publish-blog         # rsync images/ into the idle-ti.me content folder"
 	@echo "  make clean                # remove binaries, results, server logs"
 
@@ -52,6 +59,7 @@ check-tools:
 	@command -v ab    >/dev/null && echo "  ab    : $$(ab -V | head -1)"      || echo "  ab    : MISSING (apt-get install apache2-utils)"
 	@command -v wrk2     >/dev/null && echo "  wrk2  : present"                                || echo "  wrk2  : MISSING (no brew formula on Apple Silicon — see README)"
 	@(command -v vegeta >/dev/null || [ -x "$$HOME/go/bin/vegeta" ]) && echo "  vegeta: present" || echo "  vegeta: MISSING (go install github.com/tsenart/vegeta/v12@latest)"
+	@command -v k6       >/dev/null && echo "  k6    : $$(k6 version | head -1)"               || echo "  k6    : MISSING (brew install k6)"
 	@command -v $(SYS_PYTHON) >/dev/null && echo "  python: $$($(SYS_PYTHON) --version)" || echo "  python: MISSING"
 
 build-server: $(SERVER_BIN)
@@ -81,42 +89,92 @@ stop-server:
 
 # Each runner gets a fresh server so that the hiccup is replayed from t=30s.
 # We start, run, stop in sequence — separate targets keep make output legible.
+#
+# Variables HICCUP_AT and HICCUP_DURATION default to scenario-02's profile;
+# the scenario-01 targets override them to "0" so the server stays healthy.
+
+scenario-01-ab: build-server
+	@$(MAKE) -s _run-ab SCENARIO=01-healthy SERVER_HICCUP_AT=0 SERVER_HICCUP_DURATION=0
+
+scenario-01-vegeta: build-server
+	@$(MAKE) -s _run-vegeta SCENARIO=01-healthy SERVER_HICCUP_AT=0 SERVER_HICCUP_DURATION=0
+
+scenario-01-k6-bad: build-server
+	@$(MAKE) -s _run-k6-bad SCENARIO=01-healthy SERVER_HICCUP_AT=0 SERVER_HICCUP_DURATION=0
+
+scenario-01-k6-good: build-server
+	@$(MAKE) -s _run-k6-good SCENARIO=01-healthy SERVER_HICCUP_AT=0 SERVER_HICCUP_DURATION=0
+
+scenario-01: scenario-01-ab scenario-01-vegeta scenario-01-k6-bad scenario-01-k6-good
+
 scenario-02-ab: build-server
-	@$(MAKE) -s stop-server
-	@$(SERVER_BIN) -addr $(SERVER_ADDR) -baseline-latency $(BASELINE_LATENCY) \
-	               -hiccup-at $(HICCUP_AT) -hiccup-duration $(HICCUP_DURATION) \
-	               > $(SERVER_LOG).ab 2>&1 & echo $$! > $(SERVER_PID_FILE)
-	@sleep 0.5
-	@HOST=$(SERVER_HOST) bash load-tools/ab/run.sh 02-single-hiccup
-	@$(MAKE) -s stop-server
+	@$(MAKE) -s _run-ab SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
 
 scenario-02-wrk2: build-server
-	@$(MAKE) -s stop-server
-	@$(SERVER_BIN) -addr $(SERVER_ADDR) -baseline-latency $(BASELINE_LATENCY) \
-	               -hiccup-at $(HICCUP_AT) -hiccup-duration $(HICCUP_DURATION) \
-	               > $(SERVER_LOG).wrk2 2>&1 & echo $$! > $(SERVER_PID_FILE)
-	@sleep 0.5
-	@HOST=$(SERVER_HOST) bash load-tools/wrk2/run.sh 02-single-hiccup
-	@$(MAKE) -s stop-server
+	@$(MAKE) -s _run-wrk2 SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
 
 scenario-02-vegeta: build-server
-	@$(MAKE) -s stop-server
-	@$(SERVER_BIN) -addr $(SERVER_ADDR) -baseline-latency $(BASELINE_LATENCY) \
-	               -hiccup-at $(HICCUP_AT) -hiccup-duration $(HICCUP_DURATION) \
-	               > $(SERVER_LOG).vegeta 2>&1 & echo $$! > $(SERVER_PID_FILE)
-	@sleep 0.5
-	@HOST=$(SERVER_HOST) bash load-tools/vegeta/run.sh 02-single-hiccup
-	@$(MAKE) -s stop-server
+	@$(MAKE) -s _run-vegeta SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
 
-# Default scenario uses ab (closed-loop, susceptible) and Vegeta (open-loop,
-# honest). wrk2 is supported but not invoked by default because it cannot
-# be built on Apple Silicon without patches.
-scenario-02: scenario-02-ab scenario-02-vegeta
+scenario-02-k6-bad: build-server
+	@$(MAKE) -s _run-k6-bad SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
+
+scenario-02-k6-good: build-server
+	@$(MAKE) -s _run-k6-good SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
+
+# Default scenario uses ab + Vegeta + k6 (×2). wrk2 is supported but not
+# invoked by default because it cannot be built on Apple Silicon without
+# patches.
+scenario-02: scenario-02-ab scenario-02-vegeta scenario-02-k6-bad scenario-02-k6-good
+
+# ---- internal recipes (one server lifecycle per runner) ---------------------
+# These accept SCENARIO, SERVER_HICCUP_AT, SERVER_HICCUP_DURATION as variables.
+# Not meant to be called directly from the command line.
+
+.PHONY: _run-ab _run-vegeta _run-wrk2 _run-k6-bad _run-k6-good \
+        _start-server _stop-server-internal
+
+_run-ab: _start-server
+	@HOST=$(SERVER_HOST) bash load-tools/ab/run.sh $(SCENARIO)
+	@$(MAKE) -s _stop-server-internal
+
+_run-vegeta: _start-server
+	@HOST=$(SERVER_HOST) bash load-tools/vegeta/run.sh $(SCENARIO)
+	@$(MAKE) -s _stop-server-internal
+
+_run-wrk2: _start-server
+	@HOST=$(SERVER_HOST) bash load-tools/wrk2/run.sh $(SCENARIO)
+	@$(MAKE) -s _stop-server-internal
+
+_run-k6-bad: _start-server
+	@HOST=$(SERVER_HOST) bash load-tools/k6-bad/run.sh $(SCENARIO)
+	@$(MAKE) -s _stop-server-internal
+
+_run-k6-good: _start-server
+	@HOST=$(SERVER_HOST) bash load-tools/k6-good/run.sh $(SCENARIO)
+	@$(MAKE) -s _stop-server-internal
+
+_start-server:
+	@$(MAKE) -s _stop-server-internal
+	@$(SERVER_BIN) -addr $(SERVER_ADDR) -baseline-latency $(BASELINE_LATENCY) \
+	               -hiccup-at $(SERVER_HICCUP_AT) -hiccup-duration $(SERVER_HICCUP_DURATION) \
+	               > $(SERVER_LOG).$(SCENARIO) 2>&1 & echo $$! > $(SERVER_PID_FILE)
+	@sleep 0.5
+
+_stop-server-internal:
+	@if [ -f $(SERVER_PID_FILE) ]; then \
+	  pid=$$(cat $(SERVER_PID_FILE)); \
+	  if kill -0 $$pid 2>/dev/null; then kill $$pid; fi; \
+	  rm -f $(SERVER_PID_FILE); \
+	fi
+
+build-images-01: setup
+	@$(PYTHON) analysis/generate_images.py --scenario 01-healthy --mode auto
 
 build-images-02: setup
 	@$(PYTHON) analysis/generate_images.py --scenario 02-single-hiccup --mode auto
 
-build-images: build-images-02
+build-images: build-images-01 build-images-02
 
 # Default target for "everything in one shot". The leading dash on the
 # scenario line tells make to keep going if Go or wrk2 are missing —
@@ -133,8 +191,8 @@ publish-blog:
 	rsync -av --delete images/ "$(BLOG_IMG_DIR)/"
 
 clean: stop-server
-	rm -f $(SERVER_BIN) $(SERVER_LOG) $(SERVER_LOG).ab $(SERVER_LOG).wrk2 $(SERVER_LOG).vegeta
-	rm -rf results/*/ab results/*/wrk2 results/*/vegeta
+	rm -f $(SERVER_BIN) $(SERVER_LOG) $(SERVER_LOG).*
+	rm -rf results/*/ab results/*/vegeta results/*/wrk2 results/*/k6-bad results/*/k6-good
 
 # Removes the virtualenv too. Kept separate so `make clean` does not force
 # a re-install on every iteration.
