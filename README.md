@@ -42,13 +42,13 @@ results/                    raw outputs of the most recent run (gitignored)
 The repository is built up incrementally. The MVP demonstrates the canonical
 case end-to-end with two load tools.
 
-| Scenario              | Status | What it shows                                     |
-|-----------------------|--------|---------------------------------------------------|
-| 01-healthy            | done   | Closed and open loops agree when the server is OK |
-| 02-single-hiccup      | done   | One 1 s stall at t=30 s — the canonical case      |
-| 03-sustained-slowdown | TODO   | Progressive degradation                           |
-| 04-gc-pauses          | TODO   | Recurring short pauses                            |
-| 05-saturation         | TODO   | Target rate exceeds capacity                      |
+| Scenario              | Status | What it shows                                                          |
+|-----------------------|--------|------------------------------------------------------------------------|
+| 01-healthy            | done   | Closed and open loops agree when the server is OK                      |
+| 02-single-hiccup      | done   | One 1 s stall at t=30 s — the canonical case                           |
+| 03-sustained-slowdown | done   | Baseline ramps 10 ms → 100 ms between t=20 s and t=50 s                |
+| 04-gc-pauses          | done   | 200 ms gate-hold every 10 s (six pauses across the test)               |
+| 05-saturation         | done   | Server has a concurrency cap; default cap is non-binding (see scenario README for the saturated profile) |
 
 | Load tool                                  | Default model              | CO-aware? | Status |
 |--------------------------------------------|----------------------------|-----------|--------|

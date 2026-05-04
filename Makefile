@@ -23,16 +23,10 @@ SYS_PYTHON      := python3
 BLOG_IMG_DIR    := /Users/jerome/Share/Dropbox/16 - dev/11 - idle-time web site/idle-ti.me/content/blog/coordinated-omission/img
 
 .PHONY: help setup mvp \
-        scenario-01 scenario-01-ab scenario-01-vegeta \
-        scenario-01-k6-bad scenario-01-k6-good \
-        scenario-01-jmeter-bad scenario-01-jmeter-good \
-        scenario-01-wrk scenario-01-hey \
-        scenario-02 scenario-02-ab scenario-02-wrk2 scenario-02-vegeta \
-        scenario-02-k6-bad scenario-02-k6-good \
-        scenario-02-jmeter-bad scenario-02-jmeter-good \
-        scenario-02-wrk scenario-02-hey \
+        scenario-01 scenario-02 scenario-03 scenario-04 scenario-05 \
         build-server run-server stop-server \
-        build-images-01 build-images-02 build-images publish-blog \
+        build-images-01 build-images-02 build-images-03 build-images-04 build-images-05 \
+        build-images publish-blog \
         clean check-tools
 
 help:
@@ -40,10 +34,12 @@ help:
 	@echo "  make check-tools          # report which load tools are installed"
 	@echo "  make setup                # pip install Python deps for the analysis pipeline"
 	@echo "  make mvp                  # run the canonical scenario end-to-end and render images"
-	@echo "  make scenario-01          # ab + Vegeta against a healthy server (control)"
-	@echo "  make scenario-02          # ab + Vegeta against a server with a 1s hiccup at t=30s"
-	@echo "  make build-images-01      # render images for scenario 01 (or synthetic if missing)"
-	@echo "  make build-images-02      # render images for scenario 02 (or synthetic if missing)"
+	@echo "  make scenario-01          # control: 8 tools against a healthy server"
+	@echo "  make scenario-02          # 8 tools against a server with a 1s hiccup at t=30s"
+	@echo "  make scenario-03          # 8 tools against a server whose baseline ramps 10ms->100ms"
+	@echo "  make scenario-04          # 8 tools against a server with recurring 200ms pauses"
+	@echo "  make scenario-05          # 8 tools against a saturated server (capacity < target rate)"
+	@echo "  make build-images-NN      # render images for the matching scenario (01-05)"
 	@echo "  make publish-blog         # rsync images/ into the idle-ti.me content folder"
 	@echo "  make clean                # remove binaries, results, server logs"
 
@@ -94,74 +90,46 @@ stop-server:
 	  rm -f $(SERVER_PID_FILE); \
 	fi
 
-# Each runner gets a fresh server so that the hiccup is replayed from t=30s.
-# We start, run, stop in sequence — separate targets keep make output legible.
+# Each runner gets a fresh server so that the pathology under test is
+# replayed from t=0 with a clean state. We start, run, stop in sequence —
+# separate targets keep make output legible.
 #
-# Variables HICCUP_AT and HICCUP_DURATION default to scenario-02's profile;
-# the scenario-01 targets override them to "0" so the server stays healthy.
+# Each scenario passes its own SERVER_FLAGS via the umbrella target. The
+# umbrella target enumerates the eight load tools and chains them.
 
-scenario-01-ab: build-server
-	@$(MAKE) -s _run-ab SCENARIO=01-healthy SERVER_HICCUP_AT=0 SERVER_HICCUP_DURATION=0
+EIGHT_TOOLS := ab wrk hey vegeta k6-bad k6-good jmeter-bad jmeter-good
 
-scenario-01-vegeta: build-server
-	@$(MAKE) -s _run-vegeta SCENARIO=01-healthy SERVER_HICCUP_AT=0 SERVER_HICCUP_DURATION=0
+define run_eight_tools
+$(MAKE) -s _run-ab          SCENARIO=$(1) SERVER_FLAGS='$(2)' && \
+$(MAKE) -s _run-wrk         SCENARIO=$(1) SERVER_FLAGS='$(2)' && \
+$(MAKE) -s _run-hey         SCENARIO=$(1) SERVER_FLAGS='$(2)' && \
+$(MAKE) -s _run-vegeta      SCENARIO=$(1) SERVER_FLAGS='$(2)' && \
+$(MAKE) -s _run-k6-bad      SCENARIO=$(1) SERVER_FLAGS='$(2)' && \
+$(MAKE) -s _run-k6-good     SCENARIO=$(1) SERVER_FLAGS='$(2)' && \
+$(MAKE) -s _run-jmeter-bad  SCENARIO=$(1) SERVER_FLAGS='$(2)' && \
+$(MAKE) -s _run-jmeter-good SCENARIO=$(1) SERVER_FLAGS='$(2)'
+endef
 
-scenario-01-k6-bad: build-server
-	@$(MAKE) -s _run-k6-bad SCENARIO=01-healthy SERVER_HICCUP_AT=0 SERVER_HICCUP_DURATION=0
+scenario-01: build-server
+	@$(call run_eight_tools,01-healthy,)
 
-scenario-01-k6-good: build-server
-	@$(MAKE) -s _run-k6-good SCENARIO=01-healthy SERVER_HICCUP_AT=0 SERVER_HICCUP_DURATION=0
+scenario-02: build-server
+	@$(call run_eight_tools,02-single-hiccup,-hiccup-at $(HICCUP_AT) -hiccup-duration $(HICCUP_DURATION))
 
-scenario-01-jmeter-bad: build-server
-	@$(MAKE) -s _run-jmeter-bad SCENARIO=01-healthy SERVER_HICCUP_AT=0 SERVER_HICCUP_DURATION=0
+scenario-03: build-server
+	@$(call run_eight_tools,03-sustained-slowdown,-ramp-start 20s -ramp-end 50s -ramp-to 100ms)
 
-scenario-01-jmeter-good: build-server
-	@$(MAKE) -s _run-jmeter-good SCENARIO=01-healthy SERVER_HICCUP_AT=0 SERVER_HICCUP_DURATION=0
+scenario-04: build-server
+	@$(call run_eight_tools,04-gc-pauses,-gc-pause-every 10s -gc-pause-duration 200ms)
 
-scenario-01-wrk: build-server
-	@$(MAKE) -s _run-wrk SCENARIO=01-healthy SERVER_HICCUP_AT=0 SERVER_HICCUP_DURATION=0
-
-scenario-01-hey: build-server
-	@$(MAKE) -s _run-hey SCENARIO=01-healthy SERVER_HICCUP_AT=0 SERVER_HICCUP_DURATION=0
-
-scenario-01: scenario-01-ab scenario-01-vegeta scenario-01-k6-bad scenario-01-k6-good \
-             scenario-01-jmeter-bad scenario-01-jmeter-good \
-             scenario-01-wrk scenario-01-hey
+scenario-05: build-server
+	@$(call run_eight_tools,05-saturation,-max-concurrency 500)
 
 scenario-02-ab: build-server
-	@$(MAKE) -s _run-ab SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
+	@$(MAKE) -s _run-ab SCENARIO=02-single-hiccup SERVER_FLAGS='-hiccup-at $(HICCUP_AT) -hiccup-duration $(HICCUP_DURATION)'
 
 scenario-02-wrk2: build-server
-	@$(MAKE) -s _run-wrk2 SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
-
-scenario-02-vegeta: build-server
-	@$(MAKE) -s _run-vegeta SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
-
-scenario-02-k6-bad: build-server
-	@$(MAKE) -s _run-k6-bad SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
-
-scenario-02-k6-good: build-server
-	@$(MAKE) -s _run-k6-good SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
-
-scenario-02-jmeter-bad: build-server
-	@$(MAKE) -s _run-jmeter-bad SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
-
-scenario-02-jmeter-good: build-server
-	@$(MAKE) -s _run-jmeter-good SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
-
-scenario-02-wrk: build-server
-	@$(MAKE) -s _run-wrk SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
-
-scenario-02-hey: build-server
-	@$(MAKE) -s _run-hey SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
-
-# Default scenario runs all 8 supported tools: ab + wrk + hey (closed loop),
-# Vegeta + k6 (×2) + JMeter (×2) (the open/closed pairs configurable in the
-# article's tooling list). wrk2 is supported but not invoked by default
-# because it cannot be built on Apple Silicon without patches.
-scenario-02: scenario-02-ab scenario-02-wrk scenario-02-hey \
-             scenario-02-vegeta scenario-02-k6-bad scenario-02-k6-good \
-             scenario-02-jmeter-bad scenario-02-jmeter-good
+	@$(MAKE) -s _run-wrk2 SCENARIO=02-single-hiccup SERVER_FLAGS='-hiccup-at $(HICCUP_AT) -hiccup-duration $(HICCUP_DURATION)'
 
 # ---- internal recipes (one server lifecycle per runner) ---------------------
 # These accept SCENARIO, SERVER_HICCUP_AT, SERVER_HICCUP_DURATION as variables.
@@ -209,8 +177,7 @@ _run-jmeter-good: _start-server
 
 _start-server:
 	@$(MAKE) -s _stop-server-internal
-	@$(SERVER_BIN) -addr $(SERVER_ADDR) -baseline-latency $(BASELINE_LATENCY) \
-	               -hiccup-at $(SERVER_HICCUP_AT) -hiccup-duration $(SERVER_HICCUP_DURATION) \
+	@$(SERVER_BIN) -addr $(SERVER_ADDR) -baseline-latency $(BASELINE_LATENCY) $(SERVER_FLAGS) \
 	               > $(SERVER_LOG).$(SCENARIO) 2>&1 & echo $$! > $(SERVER_PID_FILE)
 	@sleep 0.5
 
@@ -227,7 +194,16 @@ build-images-01: setup
 build-images-02: setup
 	@$(PYTHON) analysis/generate_images.py --scenario 02-single-hiccup --mode auto
 
-build-images: build-images-01 build-images-02
+build-images-03: setup
+	@$(PYTHON) analysis/generate_images.py --scenario 03-sustained-slowdown --mode auto
+
+build-images-04: setup
+	@$(PYTHON) analysis/generate_images.py --scenario 04-gc-pauses --mode auto
+
+build-images-05: setup
+	@$(PYTHON) analysis/generate_images.py --scenario 05-saturation --mode auto
+
+build-images: build-images-01 build-images-02 build-images-03 build-images-04 build-images-05
 
 # Default target for "everything in one shot". The leading dash on the
 # scenario line tells make to keep going if Go or wrk2 are missing —
@@ -244,7 +220,7 @@ publish-blog:
 	rsync -av --delete images/ "$(BLOG_IMG_DIR)/"
 
 clean: stop-server
-	rm -f $(SERVER_BIN) $(SERVER_LOG) $(SERVER_LOG).*
+	rm -f $(SERVER_BIN) $(SERVER_LOG) $(SERVER_LOG).* jmeter.log
 	rm -rf results/*/ab results/*/wrk results/*/wrk2 results/*/hey \
 	       results/*/vegeta results/*/k6-bad results/*/k6-good \
 	       results/*/jmeter-bad results/*/jmeter-good

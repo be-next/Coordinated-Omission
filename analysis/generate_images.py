@@ -537,6 +537,44 @@ def _synth_open_arrays() -> tuple[np.ndarray, np.ndarray]:
     return s.percentiles, s.latencies_ms
 
 
+def _scenario_with_default_synth(scenario: str, title: str, mode: str) -> int:
+    """Render an extended scenario using the closed/open synthetic shapes
+    as fallback. Real measurements (when present) are what carry the
+    pedagogy; the synthetic fallback only ensures the renderer is always
+    exercisable.
+    """
+    closed = lambda label: (lambda: PercentileSeries(label, *_synth_closed_arrays(), synthetic=True))
+    open_ = lambda label: (lambda: PercentileSeries(label, *_synth_open_arrays(), synthetic=True))
+    return _render(
+        scenario, title, mode,
+        synth_factory={
+            "ab":          closed("ab (closed loop)"),
+            "wrk":         closed("wrk (closed loop)"),
+            "hey":         closed("hey (closed loop)"),
+            "k6_bad":      closed("k6 constant-vus (closed loop)"),
+            "jmeter_bad":  closed("JMeter ThreadGroup (closed loop)"),
+            "vegeta":      open_("Vegeta (open loop, constant rate)"),
+            "k6_good":     open_("k6 constant-arrival-rate (open loop)"),
+            "jmeter_good": open_("JMeter Precise Throughput Timer (open loop)"),
+        },
+    )
+
+
+def render_scenario_03(mode: str) -> int:
+    return _scenario_with_default_synth(
+        "03-sustained-slowdown", "Sustained slowdown (10ms → 100ms baseline ramp)", mode)
+
+
+def render_scenario_04(mode: str) -> int:
+    return _scenario_with_default_synth(
+        "04-gc-pauses", "Recurring GC pauses (200 ms every 10 s)", mode)
+
+
+def render_scenario_05(mode: str) -> int:
+    return _scenario_with_default_synth(
+        "05-saturation", "Saturation (capacity 500 in-flight, target 1000 rps)", mode)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scenario", default="02-single-hiccup",
@@ -549,6 +587,9 @@ def main() -> int:
     renderers = {
         "01-healthy": render_scenario_01,
         "02-single-hiccup": render_scenario_02,
+        "03-sustained-slowdown": render_scenario_03,
+        "04-gc-pauses": render_scenario_04,
+        "05-saturation": render_scenario_05,
     }
     if args.scenario not in renderers:
         print(f"[images] scenario {args.scenario} not implemented yet", file=sys.stderr)
