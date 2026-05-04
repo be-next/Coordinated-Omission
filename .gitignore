@@ -1,0 +1,21 @@
+server/co-server
+
+# Raw measurement data is regenerable from the runners; keep the folder
+# structure but not the artefacts.
+results/**/*.bin
+results/**/*.csv
+results/**/*.hdr
+results/**/*.json
+results/**/*.log
+results/**/*.tsv
+results/**/*.txt
+
+# Server lifecycle by-products of the Makefile orchestration.
+.server.pid
+.server.log
+.server.log.*
+
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
