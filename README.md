@@ -130,12 +130,21 @@ it up automatically.
 ## Reproducing the blog illustrations
 
 ```sh
-make build-images       # regenerate every SVG/PNG in images/
-make publish-blog       # rsync images/ into the idle-ti.me content folder
+make build-images                                          # regenerate every SVG in images/
+export BLOG_IMG_DIR=/path/to/your/blog/img                 # one-time
+make publish-blog                                          # rsync images/ into that folder
 ```
 
-Both targets are explicit on purpose: the blog post does not pull from this
-repository at build time. Images are generated, reviewed, then published.
+`BLOG_IMG_DIR` is read from the environment so the repository never
+carries a contributor's local path. You can also pass it inline:
+
+```sh
+make publish-blog BLOG_IMG_DIR=/path/to/your/blog/img
+```
+
+Both targets are explicit on purpose: the blog post does not pull from
+this repository at build time. Images are generated, reviewed, then
+published.
 
 ## License
 

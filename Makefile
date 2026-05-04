@@ -1,9 +1,9 @@
 SHELL := /usr/bin/env bash
 
 # Paths are kept relative on purpose. The repository may be checked out
-# under a directory whose name contains spaces or hyphens (e.g. Dropbox
-# folders such as "16 - dev"), and absolute paths in Make rule targets
-# would be interpreted as multiple space-separated entries.
+# under a directory whose name contains spaces or hyphens, and absolute
+# paths in Make rule targets would be interpreted as multiple
+# space-separated entries.
 SERVER_BIN      := server/co-server
 SERVER_ADDR     := 127.0.0.1:8080
 SERVER_HOST     := http://$(SERVER_ADDR)
@@ -18,9 +18,12 @@ VENV            := .venv
 PYTHON          := $(VENV)/bin/python
 SYS_PYTHON      := python3
 
-# The blog image dir contains spaces; we never expand it inside a target
-# or prerequisite list — only inside shell command bodies, where it is quoted.
-BLOG_IMG_DIR    := /Users/jerome/Share/Dropbox/16 - dev/11 - idle-time web site/idle-ti.me/content/blog/coordinated-omission/img
+# Destination folder for `make publish-blog`. Read from the environment
+# so the repository never carries a contributor's local layout. Set it
+# in your shell, e.g. `export BLOG_IMG_DIR=/path/to/blog/img`, or pass
+# it inline: `make publish-blog BLOG_IMG_DIR=/path/to/blog/img`. Quote
+# the value if the path contains spaces.
+BLOG_IMG_DIR    ?=
 
 .PHONY: help setup mvp \
         scenario-01 scenario-02 scenario-03 scenario-04 scenario-05 \
@@ -214,6 +217,13 @@ mvp:
 	@$(MAKE) build-images-02
 
 publish-blog:
+	@if [ -z "$(BLOG_IMG_DIR)" ]; then \
+	  echo "BLOG_IMG_DIR is not set." >&2; \
+	  echo "  export BLOG_IMG_DIR=/path/to/blog/img   # one-time" >&2; \
+	  echo "  make publish-blog                       # then this" >&2; \
+	  echo "or pass it inline: make publish-blog BLOG_IMG_DIR=/path/to/blog/img" >&2; \
+	  exit 1; \
+	fi
 	@if [ ! -d "$(BLOG_IMG_DIR)" ]; then \
 	  echo "blog image dir does not exist: $(BLOG_IMG_DIR)" >&2; exit 1; \
 	fi
