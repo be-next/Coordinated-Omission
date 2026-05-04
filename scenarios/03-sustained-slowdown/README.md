@@ -95,12 +95,14 @@ average). Open-loop tools sit in the middle.
 
 ## Generated images
 
-After `make build-images-03`, four SVGs are written into
+After `make build-images-03`, six SVGs are written into
 `images/03-sustained-slowdown/`:
 
 | File                                  | Content                                                 |
 |---------------------------------------|---------------------------------------------------------|
-| `closed-vs-open-percentiles.svg`      | the canonical pair — `ab` vs Vegeta                     |
-| `k6-bad-vs-good.svg`                  | the article's worked example — k6 in both modes         |
-| `jmeter-bad-vs-good.svg`              | the JMeter equivalent — ThreadGroup vs Throughput Timer |
-| `all-tools.svg`                       | all eight tools together                                |
+| `closed-vs-open-percentiles.svg`      | percentile spectrum — `ab` vs Vegeta                    |
+| `k6-bad-vs-good.svg`                  | percentile spectrum — k6 in both modes                  |
+| `jmeter-bad-vs-good.svg`              | percentile spectrum — JMeter in both modes              |
+| `all-tools.svg`                       | percentile spectrum — all eight tools                   |
+| `latency-timeline.svg`                | latency vs. time scatter; the ramp window is shaded     |
+| `throughput-timeline.svg`             | completed RPS vs. time; the ramp shows up as a smooth decay rather than a discontinuity |

@@ -99,16 +99,20 @@ conventionally classified as closed-loop. See the repository
 
 ## Generated images
 
-After `make build-images-02`, four SVGs are written into
+After `make build-images-02`, six SVGs are written into
 `images/02-single-hiccup/`:
 
 | File                                  | Content                                                 |
 |---------------------------------------|---------------------------------------------------------|
-| `closed-vs-open-percentiles.svg`      | the canonical pair — `ab` vs Vegeta                     |
-| `k6-bad-vs-good.svg`                  | the article's worked example — k6 in both modes         |
-| `jmeter-bad-vs-good.svg`              | the JMeter equivalent — ThreadGroup vs Throughput Timer |
-| `all-tools.svg`                       | all eight tools together                                |
+| `closed-vs-open-percentiles.svg`      | percentile spectrum — `ab` vs Vegeta                    |
+| `k6-bad-vs-good.svg`                  | percentile spectrum — k6 in both modes                  |
+| `jmeter-bad-vs-good.svg`              | percentile spectrum — JMeter in both modes              |
+| `all-tools.svg`                       | percentile spectrum — all eight tools                   |
+| `latency-timeline.svg`                | latency vs. time scatter; the 1 s hiccup window is shaded — `ab` shows ~10 stalled samples, Vegeta shows a ~1 000-point queueing wedge |
+| `throughput-timeline.svg`             | completed RPS vs. time; the closed-loop curve drops to zero during the hiccup, the open-loop curve drops then bursts above the target rate as the queue drains |
 
-In every plot of this scenario, two clusters of curves separate
-sharply at p99: closed-loop tools stay along the baseline, open-loop
-tools rise toward the stall duration.
+In every percentile plot of this scenario, two clusters of curves
+separate sharply at p99: closed-loop tools stay along the baseline,
+open-loop tools rise toward the stall duration. The two timeline plots
+show *why*: open-loop tools record every queued request, closed-loop
+tools record only the few in-flight at the start of the stall.

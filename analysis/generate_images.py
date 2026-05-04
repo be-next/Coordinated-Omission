@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime
 import json
 import math
 import os
@@ -356,6 +357,252 @@ def _percentile_values(sorted_samples: np.ndarray, percentiles: np.ndarray) -> n
     return sorted_samples[idx]
 
 
+# --- Timeseries parsers -------------------------------------------------------
+#
+# Each parser returns (times_since_test_start_s, latencies_ms) as numpy
+# arrays, or None if the source file is missing or empty. Latencies are
+# always milliseconds; times are normalised so the first observed sample
+# sits at t=0.
+
+Timeseries = tuple[np.ndarray, np.ndarray]
+
+
+def _normalise_times(t: list[float]) -> np.ndarray:
+    arr = np.array(t)
+    return arr - arr.min() if len(arr) else arr
+
+
+def parse_ab_timeseries(path: Path) -> Timeseries | None:
+    """ab -g writes a TSV with columns starttime, seconds, ctime, dtime, ttime, wait.
+
+    The second column ('seconds') is the Unix epoch start time of each
+    request. ttime is the total time in milliseconds.
+    """
+    if not path.exists():
+        return None
+    starts, lats = [], []
+    with path.open() as f:
+        next(f, None)
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 5:
+                continue
+            try:
+                starts.append(float(parts[1]))
+                lats.append(float(parts[4]))
+            except ValueError:
+                continue
+    if not starts:
+        return None
+    return _normalise_times(starts), np.array(lats)
+
+
+def parse_hey_timeseries(path: Path) -> Timeseries | None:
+    """hey -o csv: response-time (s) and offset (s since test start)."""
+    if not path.exists():
+        return None
+    starts, lats = [], []
+    with path.open() as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                starts.append(float(row["offset"]))
+                lats.append(float(row["response-time"]) * 1000.0)
+            except (KeyError, ValueError):
+                continue
+    if not starts:
+        return None
+    return np.array(starts), np.array(lats)
+
+
+def parse_k6_timeseries(path: Path) -> Timeseries | None:
+    """k6 --out csv: filter on metric_name=http_req_duration. Timestamp in s."""
+    if not path.exists():
+        return None
+    starts, lats = [], []
+    with path.open() as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row.get("metric_name") != "http_req_duration":
+                continue
+            try:
+                starts.append(float(row["timestamp"]))
+                lats.append(float(row["metric_value"]))
+            except (KeyError, ValueError):
+                continue
+    if not starts:
+        return None
+    return _normalise_times(starts), np.array(lats)
+
+
+def parse_jmeter_timeseries(path: Path) -> Timeseries | None:
+    """JMeter results.jtl: timeStamp in milliseconds, elapsed in milliseconds."""
+    if not path.exists():
+        return None
+    starts, lats = [], []
+    with path.open() as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                starts.append(float(row["timeStamp"]) / 1000.0)
+                lats.append(float(row["elapsed"]))
+            except (KeyError, ValueError):
+                continue
+    if not starts:
+        return None
+    return _normalise_times(starts), np.array(lats)
+
+
+def _iso_to_epoch(s: str) -> float:
+    """Robust ISO 8601 → epoch seconds, tolerant to nanosecond precision.
+
+    Vegeta emits timestamps like ``2026-05-04T12:14:32.487997917+02:00``;
+    Python's ``datetime.fromisoformat`` accepts up to 6 fractional digits.
+    Truncate the fractional part if longer.
+    """
+    if "." in s:
+        i_dot = s.index(".")
+        i = i_dot + 1
+        while i < len(s) and s[i].isdigit():
+            i += 1
+        frac = s[i_dot + 1: i][:6]
+        s = s[: i_dot + 1] + frac + s[i:]
+    return datetime.datetime.fromisoformat(s).timestamp()
+
+
+def parse_vegeta_timeseries(path: Path) -> Timeseries | None:
+    """Vegeta JSONL (``vegeta encode -to=json``): timestamp ISO 8601, latency in ns."""
+    if not path.exists():
+        return None
+    starts, lats = [], []
+    with path.open() as f:
+        for line in f:
+            try:
+                obj = json.loads(line)
+                starts.append(_iso_to_epoch(obj["timestamp"]))
+                lats.append(float(obj["latency"]) / 1e6)
+            except (json.JSONDecodeError, KeyError, ValueError):
+                continue
+    if not starts:
+        return None
+    return _normalise_times(starts), np.array(lats)
+
+
+# --- Event annotations --------------------------------------------------------
+
+def _apply_events(ax, events: list[dict] | None) -> None:
+    if not events:
+        return
+    ymin, ymax = ax.get_ylim()
+    for ev in events:
+        kind = ev.get("kind", "vline")
+        color = ev.get("color", "red")
+        if kind == "vline":
+            ax.axvline(ev["t"], color=color, linestyle=ev.get("linestyle", "--"),
+                       linewidth=1.0, alpha=ev.get("alpha", 0.55))
+            label = ev.get("label", "")
+            if label:
+                ax.text(ev["t"], ymax, f" {label}", rotation=90,
+                        va="top", ha="left", color=color, fontsize="x-small", alpha=0.9)
+        elif kind == "vspan":
+            ax.axvspan(ev["t0"], ev["t1"], color=color, alpha=ev.get("alpha", 0.10),
+                       linewidth=0)
+            label = ev.get("label", "")
+            if label:
+                ax.text((ev["t0"] + ev["t1"]) / 2, ymax, f"{label}", rotation=0,
+                        va="top", ha="center", color=color, fontsize="x-small", alpha=0.9)
+
+
+def _events_for(scenario: str) -> list[dict]:
+    if scenario == "02-single-hiccup":
+        return [{"kind": "vspan", "t0": 30.0, "t1": 31.0,
+                 "label": "1 s hiccup", "color": "tab:red", "alpha": 0.12}]
+    if scenario == "03-sustained-slowdown":
+        return [{"kind": "vspan", "t0": 20.0, "t1": 50.0,
+                 "label": "baseline ramp 10 → 100 ms", "color": "tab:orange", "alpha": 0.10}]
+    if scenario == "04-gc-pauses":
+        out = [{"kind": "vline", "t": float(t), "color": "tab:red", "linestyle": "--",
+                "alpha": 0.45, "label": "pause" if t == 10 else ""} for t in (10, 20, 30, 40, 50, 60)]
+        return out
+    return []
+
+
+# --- Plot helpers -------------------------------------------------------------
+
+def plot_timeline(series_dict: dict[str, Timeseries], out_path: Path,
+                  title: str, events: list[dict] | None = None) -> None:
+    """Latency-vs-time scatter for a handful of representative tools.
+
+    Each series is sub-sampled to ~5 000 points so the SVG stays under a
+    megabyte and the alpha-blended density of the dot cloud reads cleanly.
+    """
+    # The scatter layer is rasterized so the SVG keeps a vector frame
+    # (axes, ticks, legend, title) but inlines the dot cloud as a single
+    # PNG. Rendering 20 000 individual <circle> elements bloats the file
+    # past 3 MB and looks worse — overlapping dots in vector form do not
+    # blend the way PNG alpha-compositing does.
+    fig, ax = plt.subplots(figsize=(12.5, 6.5), dpi=120)
+    rng = np.random.default_rng(0)
+    for label, (t, lat) in series_dict.items():
+        if len(t) > 5000:
+            idx = np.sort(rng.choice(len(t), 5000, replace=False))
+            t, lat = t[idx], lat[idx]
+        ax.scatter(t, lat, s=4, alpha=0.35, label=label,
+                   edgecolors="none", rasterized=True)
+    ax.set_rasterization_zorder(0)
+    ax.set_xlabel("time since test start (s)")
+    ax.set_ylabel("latency (ms)")
+    ax.set_yscale("log")
+    ax.set_title(title)
+    ax.grid(True, which="both", alpha=0.3)
+    _apply_events(ax, events)
+    leg = ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0),
+                    framealpha=0.9, fontsize="small", borderaxespad=0)
+    for handle in leg.legend_handles:
+        handle.set_alpha(1.0)
+        handle.set_sizes([30])
+    fig.tight_layout(rect=(0, 0, 0.78, 1.0))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+    print(f"[images] wrote {out_path.relative_to(REPO_ROOT)}")
+
+
+def plot_throughput(series_dict: dict[str, Timeseries], out_path: Path,
+                    title: str, events: list[dict] | None = None) -> None:
+    """Completed-requests-per-second timeline. One line per tool.
+
+    The completion time of each request is start_time + latency. We bin
+    completions in 1-second buckets — the chart that results is the
+    canonical "what does the throughput meter show during the hiccup?"
+    picture: closed-loop drops to zero, open-loop drops too then bursts
+    back above the target rate as the queue drains.
+    """
+    fig, ax = plt.subplots(figsize=(12.5, 6.5), dpi=120)
+    max_t = 0.0
+    for t, lat in series_dict.values():
+        if len(t):
+            max_t = max(max_t, float((t + lat / 1000.0).max()))
+    bin_edges = np.arange(0, math.ceil(max_t) + 2, 1.0)
+    centres = bin_edges[:-1] + 0.5
+    for label, (t, lat) in series_dict.items():
+        completions = t + lat / 1000.0
+        counts, _ = np.histogram(completions, bins=bin_edges)
+        ax.plot(centres, counts, label=label, linewidth=1.6, alpha=0.9)
+    ax.set_xlabel("time since test start (s)")
+    ax.set_ylabel("completed requests per second (1 s bins)")
+    ax.set_title(title)
+    ax.grid(True, which="major", alpha=0.3)
+    _apply_events(ax, events)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0),
+              framealpha=0.9, fontsize="small", borderaxespad=0)
+    fig.tight_layout(rect=(0, 0, 0.78, 1.0))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
+    plt.close(fig)
+    print(f"[images] wrote {out_path.relative_to(REPO_ROOT)}")
+
+
 def plot_comparison(series: list[PercentileSeries], out_path: Path, title: str) -> None:
     # The legend lives outside the plot area, anchored to the right edge.
     # The previous in-plot placement collided with the tail-rising portion
@@ -490,7 +737,68 @@ def _render(scenario: str, title: str, mode: str, synth_factory) -> int:
     ]
     plot_comparison(all_series, images_dir / f"all-tools{_suffix_for(all_series)}.svg",
                     f"{title} — eight load tools")
+
+    # Timeline + throughput plots from per-request timestamps. Only run when
+    # measured data is present — synthetic mode does not carry timestamps.
+    if mode != "synthetic":
+        _render_timeseries(scenario, title, results_dir, images_dir)
     return 0
+
+
+# Tools picked for the latency-timeline scatter. All eight would render
+# but the chart becomes hard to read past four overlapping clouds.
+# These four cover both classes (closed/open) and both worked examples
+# (k6, JMeter implicit through the comparison plot).
+_TIMELINE_TOOLS: dict[str, tuple[str, str]] = {
+    "ab (closed loop)":                          ("ab",         "timeseries.tsv"),
+    "k6 constant-vus (closed loop)":             ("k6-bad",     "samples.csv"),
+    "Vegeta (open loop)":                        ("vegeta",     "results.jsonl"),
+    "k6 constant-arrival-rate (open loop)":      ("k6-good",    "samples.csv"),
+}
+
+_TIMELINE_PARSERS = {
+    "timeseries.tsv":  parse_ab_timeseries,
+    "samples.csv":     None,   # filled below: depends on tool dir name
+    "results.jsonl":   parse_vegeta_timeseries,
+    "results.jtl":     parse_jmeter_timeseries,
+}
+
+
+def _load_timeseries(label: str, results_dir: Path) -> Timeseries | None:
+    tool_dir, filename = _TIMELINE_TOOLS[label]
+    path = results_dir / tool_dir / filename
+    if filename == "timeseries.tsv":
+        return parse_ab_timeseries(path)
+    if filename == "results.jsonl":
+        return parse_vegeta_timeseries(path)
+    if filename == "samples.csv":
+        # k6-bad / k6-good both write CSV with the same schema; for hey the
+        # schema differs but it isn't picked for the timeline subset.
+        return parse_k6_timeseries(path)
+    if filename == "results.jtl":
+        return parse_jmeter_timeseries(path)
+    return None
+
+
+def _render_timeseries(scenario: str, title: str, results_dir: Path, images_dir: Path) -> None:
+    measured: dict[str, Timeseries] = {}
+    for label in _TIMELINE_TOOLS:
+        ts = _load_timeseries(label, results_dir)
+        if ts is not None:
+            measured[label] = ts
+
+    if not measured:
+        return
+
+    events = _events_for(scenario)
+    plot_timeline(measured,
+                  images_dir / "latency-timeline.svg",
+                  f"{title} — latency vs. time",
+                  events)
+    plot_throughput(measured,
+                    images_dir / "throughput-timeline.svg",
+                    f"{title} — completed RPS vs. time (1 s bins)",
+                    events)
 
 
 def render_scenario_01(mode: str) -> int:

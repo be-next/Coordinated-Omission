@@ -90,12 +90,14 @@ their samples land inside the pauses.
 
 ## Generated images
 
-After `make build-images-04`, four SVGs are written into
+After `make build-images-04`, six SVGs are written into
 `images/04-gc-pauses/`:
 
 | File                                  | Content                                                 |
 |---------------------------------------|---------------------------------------------------------|
-| `closed-vs-open-percentiles.svg`      | the canonical pair — `ab` vs Vegeta                     |
-| `k6-bad-vs-good.svg`                  | the article's worked example — k6 in both modes         |
-| `jmeter-bad-vs-good.svg`              | the JMeter equivalent — ThreadGroup vs Throughput Timer |
-| `all-tools.svg`                       | all eight tools together                                |
+| `closed-vs-open-percentiles.svg`      | percentile spectrum — `ab` vs Vegeta                    |
+| `k6-bad-vs-good.svg`                  | percentile spectrum — k6 in both modes                  |
+| `jmeter-bad-vs-good.svg`              | percentile spectrum — JMeter in both modes              |
+| `all-tools.svg`                       | percentile spectrum — all eight tools                   |
+| `latency-timeline.svg`                | latency vs. time scatter; the six pauses appear as vertical streaks at t=10, 20, 30, 40, 50, 60 s (open-loop) and isolated spikes (closed-loop) |
+| `throughput-timeline.svg`             | completed RPS vs. time; six visible dips per tool at the pause moments |

@@ -34,4 +34,8 @@ echo "GET ${HOST}${ENDPOINT}" | \
 "${VEGETA}" report -type=hdrplot < "${OUT_DIR}/results.bin" > "${OUT_DIR}/vegeta.hdr"
 "${VEGETA}" report -type=json    < "${OUT_DIR}/results.bin" > "${OUT_DIR}/vegeta.json"
 
+# JSON-Lines stream of every individual result, one per line. Used by the
+# timeline / throughput plots in analysis/generate_images.py.
+"${VEGETA}" encode -to=json      < "${OUT_DIR}/results.bin" > "${OUT_DIR}/results.jsonl"
+
 echo "[vegeta] done — see ${OUT_DIR}/"

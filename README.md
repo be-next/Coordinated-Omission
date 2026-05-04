@@ -54,7 +54,8 @@ analysis/                        Python scripts that parse results and
   generate_images.py               main entry point
   requirements.txt                 matplotlib + numpy
 images/                          versioned, generated illustrations,
-                                 one subfolder per scenario, four SVGs each
+                                 one subfolder per scenario, six SVGs each
+                                 (4 percentile-distribution + 2 timeline)
 results/                         raw measurement outputs (gitignored)
 Makefile                         orchestration: run, render, publish
 ```
