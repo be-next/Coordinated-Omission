@@ -5,10 +5,14 @@ server/co-server
 results/**/*.bin
 results/**/*.csv
 results/**/*.hdr
+results/**/*.jtl
 results/**/*.json
 results/**/*.log
 results/**/*.tsv
 results/**/*.txt
+
+# JMeter writes a stray jmeter.log at the cwd by default.
+jmeter.log
 
 # Server lifecycle by-products of the Makefile orchestration.
 .server.pid

@@ -50,17 +50,27 @@ case end-to-end with two load tools.
 | 04-gc-pauses          | TODO   | Recurring short pauses                            |
 | 05-saturation         | TODO   | Target rate exceeds capacity                      |
 
-| Load tool                         | Default model              | CO-aware? | Status |
-|-----------------------------------|----------------------------|-----------|--------|
-| ab                                | closed loop                | no        | done   |
-| Vegeta                            | open (constant rate)       | yes       | done   |
-| k6 — `constant-vus`               | closed loop                | no        | done   |
-| k6 — `constant-arrival-rate`      | open (constant rate)       | yes       | done   |
-| wrk                               | closed loop                | no        | TODO   |
-| wrk2                              | open (constant rate)       | yes       | wired but unbuilt on Apple Silicon (see below) |
-| hey                               | closed loop                | no        | TODO   |
-| JMeter (default)                  | closed loop                | no        | TODO   |
-| JMeter + Constant Throughput Timer| open (configurable)        | yes       | TODO   |
+| Load tool                                  | Default model              | CO-aware? | Status |
+|--------------------------------------------|----------------------------|-----------|--------|
+| ab                                         | closed loop                | no        | done   |
+| wrk                                        | closed loop                | partial — see below | done   |
+| hey                                        | closed loop                | no        | done   |
+| Vegeta                                     | open (constant rate)       | yes       | done   |
+| k6 — `constant-vus`                        | closed loop                | no        | done   |
+| k6 — `constant-arrival-rate`               | open (constant rate)       | yes       | done   |
+| JMeter — ThreadGroup (default)             | closed loop                | no        | done   |
+| JMeter — Precise Throughput Timer          | open (configurable)        | yes       | done   |
+| wrk2                                       | open (constant rate)       | yes       | wired but unbuilt on Apple Silicon |
+
+**About `wrk`.** The Will Glozer fork is conventionally classified as a
+closed-loop tool, but its `--latency` HDR output reports a tail that
+sits much closer to the open-loop tools than to the other closed-loop
+tools — in scenario 02, p99 ≈ 408 ms, in line with Vegeta and k6-good
+rather than with ab or k6-bad. The body of the distribution (p50–p90)
+behaves like a closed-loop tool. The most plausible explanation is that
+wrk's internal timestamping is closer to "intended start time" than its
+peers; we have not chased it down further. Treat wrk as a borderline
+case rather than a clean negative example.
 
 **A k6 footgun worth knowing.** The `constant-arrival-rate` executor is
 only honest if `preAllocatedVUs` and `maxVUs` are large enough to absorb
@@ -81,6 +91,9 @@ The MVP needs:
   (binary lands in `$HOME/go/bin/vegeta`; the runner finds it there even
   if `$HOME/go/bin` is not on `PATH`)
 - `k6` 0.50+ — `brew install k6`
+- `wrk` — `brew install wrk`
+- `hey` — `brew install hey`
+- `jmeter` 5.6+ — `brew install jmeter`
 - `python3` 3.10+ — `make setup` creates a local venv and pip-installs
   matplotlib and numpy
 
@@ -90,7 +103,8 @@ predates arm64. The repository falls back to Vegeta as the open-loop
 reference. If you have a working `wrk2` binary, the analysis pipeline picks
 it up automatically.
 
-Subsequent scenarios will add `wrk`, `hey`, and `jmeter`.
+Subsequent scenarios will exercise sustained slowdowns, recurring GC
+pauses, and saturation regimes (see status table above).
 
 ## Reproducing the blog illustrations
 

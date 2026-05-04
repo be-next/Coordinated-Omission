@@ -117,6 +117,93 @@ def parse_vegeta_hdr(path: Path) -> PercentileSeries | None:
 _K6_PCT_RE = re.compile(r"^p\((\d+(?:\.\d+)?)\)$")
 
 
+def _percentiles_from_samples(samples: np.ndarray, label: str, *, synthetic: bool = False) -> PercentileSeries:
+    """Compute the standard percentile grid from a 1-D array of latencies (ms)."""
+    sorted_samples = np.sort(samples)
+    lat = _percentile_values(sorted_samples, PERCENTILES)
+    return PercentileSeries(label, PERCENTILES.copy(), lat, synthetic=synthetic)
+
+
+def parse_jmeter_csv(path: Path, label: str) -> PercentileSeries | None:
+    """Parse the JMeter CSV log: column ``elapsed`` is the latency in ms."""
+    if not path.exists():
+        return None
+    samples: list[float] = []
+    with path.open() as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                samples.append(float(row["elapsed"]))
+            except (KeyError, ValueError):
+                continue
+    if not samples:
+        return None
+    return _percentiles_from_samples(np.array(samples), label)
+
+
+def parse_hey_csv(path: Path, label: str) -> PercentileSeries | None:
+    """Parse the hey CSV (-o csv): column ``response-time`` is in seconds."""
+    if not path.exists():
+        return None
+    samples: list[float] = []
+    with path.open() as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                samples.append(float(row["response-time"]) * 1000.0)
+            except (KeyError, ValueError):
+                continue
+    if not samples:
+        return None
+    return _percentiles_from_samples(np.array(samples), label)
+
+
+_WRK_LATENCY_LINE = re.compile(r"^\s*(\d+(?:\.\d+)?)%\s+([\d\.]+)(us|ms|s|m)\s*$")
+_WRK_MAX_LINE = re.compile(r"Latency\s+\S+\s+\S+\s+([\d\.]+)(us|ms|s|m)")
+
+
+def _wrk_unit_to_ms(unit: str) -> float:
+    return {"us": 0.001, "ms": 1.0, "s": 1000.0, "m": 60_000.0}[unit]
+
+
+def parse_wrk_text(path: Path, label: str) -> PercentileSeries | None:
+    """Pull the percentile distribution out of wrk's --latency text output.
+
+    wrk does not produce a machine-readable file; this picks up the
+    `Latency Distribution` block (50/75/90/99) plus the `Latency` line max.
+    Sparser than the other parsers but still enough to draw a curve.
+    """
+    if not path.exists():
+        return None
+    pairs: list[tuple[float, float]] = []
+    max_ms: float | None = None
+    in_block = False
+    for line in path.read_text(errors="ignore").splitlines():
+        if "Latency" in line and not in_block:
+            m = _WRK_MAX_LINE.search(line)
+            if m:
+                max_ms = float(m.group(1)) * _wrk_unit_to_ms(m.group(2))
+        if "Latency Distribution" in line:
+            in_block = True
+            continue
+        if in_block:
+            m = _WRK_LATENCY_LINE.match(line)
+            if m:
+                pct = float(m.group(1)) / 100.0
+                val = float(m.group(2)) * _wrk_unit_to_ms(m.group(3))
+                pairs.append((pct, val))
+            elif pairs and not line.strip():
+                break
+    if not pairs:
+        return None
+    if max_ms is not None:
+        pairs.append((0.99999, max_ms))
+    pairs.sort()
+    pct = np.array([p for p, _ in pairs])
+    lat = np.array([l for _, l in pairs])
+    return PercentileSeries(label, pct, lat)
+
+
 def parse_k6_summary(path: Path, label: str) -> PercentileSeries | None:
     """Parse the percentile aggregates produced by `k6 --summary-export`.
 
@@ -270,7 +357,9 @@ def _percentile_values(sorted_samples: np.ndarray, percentiles: np.ndarray) -> n
 
 
 def plot_comparison(series: list[PercentileSeries], out_path: Path, title: str) -> None:
-    fig, ax = plt.subplots(figsize=(9, 5.5), dpi=120)
+    n = len(series)
+    figsize = (10.5, 6.5) if n > 4 else (9, 5.5)
+    fig, ax = plt.subplots(figsize=figsize, dpi=120)
     for s in series:
         x = 1.0 / np.maximum(1.0 - s.percentiles, 1e-6)
         label = s.label + ("  [synthetic]" if s.synthetic else "  [measured]")
@@ -290,7 +379,8 @@ def plot_comparison(series: list[PercentileSeries], out_path: Path, title: str) 
     ax.set_ylabel("latency (ms)")
     ax.set_title(f"{title}\n{subtitle}")
     ax.grid(True, which="both", alpha=0.3)
-    ax.legend(loc="upper left", framealpha=0.9)
+    legend_loc = "upper left" if n <= 4 else "center left"
+    ax.legend(loc=legend_loc, framealpha=0.9, fontsize="small")
 
     xticks = [1, 2, 10, 100, 1_000, 10_000, 100_000]
     xlabels = ["0%", "50%", "90%", "99%", "99.9%", "99.99%", "99.999%"]
@@ -321,82 +411,130 @@ def _suffix_for(series: list[PercentileSeries]) -> str:
     return "-mixed"
 
 
-def _render(scenario: str, title: str, mode: str,
-            synth_ab, synth_open, synth_k6_bad, synth_k6_good) -> int:
+def _render(scenario: str, title: str, mode: str, synth_factory) -> int:
+    """Render the four canonical SVGs for a scenario.
+
+    ``synth_factory`` is a dict mapping the keys
+    {ab, vegeta, wrk, hey, k6_bad, k6_good, jmeter_bad, jmeter_good} to
+    a zero-arg callable returning a synthetic PercentileSeries used as
+    a fallback when the corresponding measured file is absent.
+    """
     results_dir = REPO_ROOT / "results" / scenario
     images_dir = REPO_ROOT / "images" / scenario
 
     if mode == "synthetic":
-        ab = open_ = k6_bad = k6_good = None
+        loaded: dict[str, PercentileSeries | None] = {k: None for k in synth_factory}
     else:
-        ab = parse_ab_csv(results_dir / "ab" / "percentiles.csv")
-        open_ = (
-            parse_vegeta_hdr(results_dir / "vegeta" / "vegeta.hdr")
-            or parse_wrk2_hdr(results_dir / "wrk2" / "wrk2.hdr")
-            or parse_wrk2_txt(results_dir / "wrk2" / "wrk2.txt")
-        )
-        k6_bad = parse_k6_summary(results_dir / "k6-bad" / "summary.json",
-                                  "k6 constant-vus (closed loop)")
-        k6_good = parse_k6_summary(results_dir / "k6-good" / "summary.json",
-                                   "k6 constant-arrival-rate (open loop)")
+        loaded = {
+            "ab": parse_ab_csv(results_dir / "ab" / "percentiles.csv"),
+            "vegeta": (
+                parse_vegeta_hdr(results_dir / "vegeta" / "vegeta.hdr")
+                or parse_wrk2_hdr(results_dir / "wrk2" / "wrk2.hdr")
+                or parse_wrk2_txt(results_dir / "wrk2" / "wrk2.txt")
+            ),
+            "wrk": parse_wrk_text(results_dir / "wrk" / "wrk.txt", "wrk (closed loop)"),
+            "hey": parse_hey_csv(results_dir / "hey" / "samples.csv", "hey (closed loop)"),
+            "k6_bad": parse_k6_summary(
+                results_dir / "k6-bad" / "summary.json",
+                "k6 constant-vus (closed loop)",
+            ),
+            "k6_good": parse_k6_summary(
+                results_dir / "k6-good" / "summary.json",
+                "k6 constant-arrival-rate (open loop)",
+            ),
+            "jmeter_bad": parse_jmeter_csv(
+                results_dir / "jmeter-bad" / "results.jtl",
+                "JMeter ThreadGroup (closed loop)",
+            ),
+            "jmeter_good": parse_jmeter_csv(
+                results_dir / "jmeter-good" / "results.jtl",
+                "JMeter Precise Throughput Timer (open loop)",
+            ),
+        }
 
-    ab = _series_with_fallback(ab, synth_ab, mode)
-    open_ = _series_with_fallback(open_, synth_open, mode)
-    k6_bad = _series_with_fallback(k6_bad, synth_k6_bad, mode)
-    k6_good = _series_with_fallback(k6_good, synth_k6_good, mode)
+    for key, factory in synth_factory.items():
+        loaded[key] = _series_with_fallback(loaded.get(key), factory, mode)
 
-    if any(s is None for s in (ab, open_, k6_bad, k6_good)):
-        print(f"[images] {scenario}: missing real data; run the scenario first or use --mode synthetic", file=sys.stderr)
+    missing = [k for k, v in loaded.items() if v is None]
+    if missing:
+        print(f"[images] {scenario}: missing series {missing}; run the scenario or use --mode synthetic",
+              file=sys.stderr)
         return 1
 
-    all_series = [ab, k6_bad, open_, k6_good]
-    plot_comparison(
-        all_series,
-        images_dir / f"all-tools{_suffix_for(all_series)}.svg",
-        f"{title} — four tools",
-    )
+    # 2-series (canonical, kept stable for the blog post).
+    pair = [loaded["ab"], loaded["vegeta"]]
+    plot_comparison(pair, images_dir / f"closed-vs-open-percentiles{_suffix_for(pair)}.svg",
+                    f"{title} — ab vs Vegeta")
 
-    # k6-only plot reproduces the worked example from the blog post
-    # (closed-loop constant-vus vs open-loop constant-arrival-rate).
-    k6_pair = [k6_bad, k6_good]
-    plot_comparison(
-        k6_pair,
-        images_dir / f"k6-bad-vs-good{_suffix_for(k6_pair)}.svg",
-        f"{title} — k6 constant-vus vs constant-arrival-rate",
-    )
+    # k6 worked example from the blog post.
+    k6_pair = [loaded["k6_bad"], loaded["k6_good"]]
+    plot_comparison(k6_pair, images_dir / f"k6-bad-vs-good{_suffix_for(k6_pair)}.svg",
+                    f"{title} — k6 constant-vus vs constant-arrival-rate")
 
-    # Original 2-tool plot kept for backwards compatibility with the blog.
-    pair = [ab, open_]
-    plot_comparison(
-        pair,
-        images_dir / f"closed-vs-open-percentiles{_suffix_for(pair)}.svg",
-        f"{title} — ab vs Vegeta",
-    )
+    # JMeter worked example (default ThreadGroup vs Precise Throughput Timer).
+    jm_pair = [loaded["jmeter_bad"], loaded["jmeter_good"]]
+    plot_comparison(jm_pair, images_dir / f"jmeter-bad-vs-good{_suffix_for(jm_pair)}.svg",
+                    f"{title} — JMeter ThreadGroup vs Precise Throughput Timer")
+
+    # All tools together: closed-loop tools first (warm reading order), then
+    # open-loop tools — matplotlib's default cycle gives them distinct colours.
+    all_series = [
+        loaded["ab"], loaded["wrk"], loaded["hey"],
+        loaded["k6_bad"], loaded["jmeter_bad"],
+        loaded["vegeta"], loaded["k6_good"], loaded["jmeter_good"],
+    ]
+    plot_comparison(all_series, images_dir / f"all-tools{_suffix_for(all_series)}.svg",
+                    f"{title} — eight load tools")
     return 0
 
 
 def render_scenario_01(mode: str) -> int:
+    healthy = lambda label, seed: (lambda: synthetic_healthy(label, seed=seed))
     return _render(
         "01-healthy",
         "Healthy server (control)",
         mode,
-        lambda: synthetic_healthy("ab (closed loop)", seed=11),
-        lambda: synthetic_healthy("Vegeta (open loop, constant rate)", seed=12),
-        lambda: synthetic_healthy("k6 constant-vus (closed loop)", seed=13),
-        lambda: synthetic_healthy("k6 constant-arrival-rate (open loop)", seed=14),
+        synth_factory={
+            "ab":          healthy("ab (closed loop)", 11),
+            "wrk":         healthy("wrk (closed loop)", 12),
+            "hey":         healthy("hey (closed loop)", 13),
+            "k6_bad":      healthy("k6 constant-vus (closed loop)", 14),
+            "jmeter_bad":  healthy("JMeter ThreadGroup (closed loop)", 15),
+            "vegeta":      healthy("Vegeta (open loop, constant rate)", 16),
+            "k6_good":     healthy("k6 constant-arrival-rate (open loop)", 17),
+            "jmeter_good": healthy("JMeter Precise Throughput Timer (open loop)", 18),
+        },
     )
 
 
 def render_scenario_02(mode: str) -> int:
+    closed = lambda label: (lambda: PercentileSeries(label, *_synth_closed_arrays(), synthetic=True))
+    open_ = lambda label: (lambda: PercentileSeries(label, *_synth_open_arrays(), synthetic=True))
     return _render(
         "02-single-hiccup",
         "Single 1 s hiccup",
         mode,
-        synthetic_closed_loop,
-        synthetic_open_loop,
-        synthetic_closed_loop_k6,
-        synthetic_open_loop_k6,
+        synth_factory={
+            "ab":          synthetic_closed_loop,
+            "wrk":         closed("wrk (closed loop)"),
+            "hey":         closed("hey (closed loop)"),
+            "k6_bad":      synthetic_closed_loop_k6,
+            "jmeter_bad":  closed("JMeter ThreadGroup (closed loop)"),
+            "vegeta":      synthetic_open_loop,
+            "k6_good":     synthetic_open_loop_k6,
+            "jmeter_good": open_("JMeter Precise Throughput Timer (open loop)"),
+        },
     )
+
+
+def _synth_closed_arrays() -> tuple[np.ndarray, np.ndarray]:
+    s = synthetic_closed_loop()
+    return s.percentiles, s.latencies_ms
+
+
+def _synth_open_arrays() -> tuple[np.ndarray, np.ndarray]:
+    s = synthetic_open_loop()
+    return s.percentiles, s.latencies_ms
 
 
 def main() -> int:

@@ -25,8 +25,12 @@ BLOG_IMG_DIR    := /Users/jerome/Share/Dropbox/16 - dev/11 - idle-time web site/
 .PHONY: help setup mvp \
         scenario-01 scenario-01-ab scenario-01-vegeta \
         scenario-01-k6-bad scenario-01-k6-good \
+        scenario-01-jmeter-bad scenario-01-jmeter-good \
+        scenario-01-wrk scenario-01-hey \
         scenario-02 scenario-02-ab scenario-02-wrk2 scenario-02-vegeta \
         scenario-02-k6-bad scenario-02-k6-good \
+        scenario-02-jmeter-bad scenario-02-jmeter-good \
+        scenario-02-wrk scenario-02-hey \
         build-server run-server stop-server \
         build-images-01 build-images-02 build-images publish-blog \
         clean check-tools
@@ -60,6 +64,9 @@ check-tools:
 	@command -v wrk2     >/dev/null && echo "  wrk2  : present"                                || echo "  wrk2  : MISSING (no brew formula on Apple Silicon — see README)"
 	@(command -v vegeta >/dev/null || [ -x "$$HOME/go/bin/vegeta" ]) && echo "  vegeta: present" || echo "  vegeta: MISSING (go install github.com/tsenart/vegeta/v12@latest)"
 	@command -v k6       >/dev/null && echo "  k6    : $$(k6 version | head -1)"               || echo "  k6    : MISSING (brew install k6)"
+	@command -v jmeter   >/dev/null && echo "  jmeter: present"                                || echo "  jmeter: MISSING (brew install jmeter)"
+	@command -v wrk      >/dev/null && echo "  wrk   : present"                                || echo "  wrk   : MISSING (brew install wrk)"
+	@command -v hey      >/dev/null && echo "  hey   : present"                                || echo "  hey   : MISSING (brew install hey)"
 	@command -v $(SYS_PYTHON) >/dev/null && echo "  python: $$($(SYS_PYTHON) --version)" || echo "  python: MISSING"
 
 build-server: $(SERVER_BIN)
@@ -105,7 +112,21 @@ scenario-01-k6-bad: build-server
 scenario-01-k6-good: build-server
 	@$(MAKE) -s _run-k6-good SCENARIO=01-healthy SERVER_HICCUP_AT=0 SERVER_HICCUP_DURATION=0
 
-scenario-01: scenario-01-ab scenario-01-vegeta scenario-01-k6-bad scenario-01-k6-good
+scenario-01-jmeter-bad: build-server
+	@$(MAKE) -s _run-jmeter-bad SCENARIO=01-healthy SERVER_HICCUP_AT=0 SERVER_HICCUP_DURATION=0
+
+scenario-01-jmeter-good: build-server
+	@$(MAKE) -s _run-jmeter-good SCENARIO=01-healthy SERVER_HICCUP_AT=0 SERVER_HICCUP_DURATION=0
+
+scenario-01-wrk: build-server
+	@$(MAKE) -s _run-wrk SCENARIO=01-healthy SERVER_HICCUP_AT=0 SERVER_HICCUP_DURATION=0
+
+scenario-01-hey: build-server
+	@$(MAKE) -s _run-hey SCENARIO=01-healthy SERVER_HICCUP_AT=0 SERVER_HICCUP_DURATION=0
+
+scenario-01: scenario-01-ab scenario-01-vegeta scenario-01-k6-bad scenario-01-k6-good \
+             scenario-01-jmeter-bad scenario-01-jmeter-good \
+             scenario-01-wrk scenario-01-hey
 
 scenario-02-ab: build-server
 	@$(MAKE) -s _run-ab SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
@@ -122,16 +143,32 @@ scenario-02-k6-bad: build-server
 scenario-02-k6-good: build-server
 	@$(MAKE) -s _run-k6-good SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
 
-# Default scenario uses ab + Vegeta + k6 (×2). wrk2 is supported but not
-# invoked by default because it cannot be built on Apple Silicon without
-# patches.
-scenario-02: scenario-02-ab scenario-02-vegeta scenario-02-k6-bad scenario-02-k6-good
+scenario-02-jmeter-bad: build-server
+	@$(MAKE) -s _run-jmeter-bad SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
+
+scenario-02-jmeter-good: build-server
+	@$(MAKE) -s _run-jmeter-good SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
+
+scenario-02-wrk: build-server
+	@$(MAKE) -s _run-wrk SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
+
+scenario-02-hey: build-server
+	@$(MAKE) -s _run-hey SCENARIO=02-single-hiccup SERVER_HICCUP_AT=$(HICCUP_AT) SERVER_HICCUP_DURATION=$(HICCUP_DURATION)
+
+# Default scenario runs all 8 supported tools: ab + wrk + hey (closed loop),
+# Vegeta + k6 (×2) + JMeter (×2) (the open/closed pairs configurable in the
+# article's tooling list). wrk2 is supported but not invoked by default
+# because it cannot be built on Apple Silicon without patches.
+scenario-02: scenario-02-ab scenario-02-wrk scenario-02-hey \
+             scenario-02-vegeta scenario-02-k6-bad scenario-02-k6-good \
+             scenario-02-jmeter-bad scenario-02-jmeter-good
 
 # ---- internal recipes (one server lifecycle per runner) ---------------------
 # These accept SCENARIO, SERVER_HICCUP_AT, SERVER_HICCUP_DURATION as variables.
 # Not meant to be called directly from the command line.
 
-.PHONY: _run-ab _run-vegeta _run-wrk2 _run-k6-bad _run-k6-good \
+.PHONY: _run-ab _run-vegeta _run-wrk2 _run-wrk _run-hey \
+        _run-k6-bad _run-k6-good _run-jmeter-bad _run-jmeter-good \
         _start-server _stop-server-internal
 
 _run-ab: _start-server
@@ -146,12 +183,28 @@ _run-wrk2: _start-server
 	@HOST=$(SERVER_HOST) bash load-tools/wrk2/run.sh $(SCENARIO)
 	@$(MAKE) -s _stop-server-internal
 
+_run-wrk: _start-server
+	@HOST=$(SERVER_HOST) bash load-tools/wrk/run.sh $(SCENARIO)
+	@$(MAKE) -s _stop-server-internal
+
+_run-hey: _start-server
+	@HOST=$(SERVER_HOST) bash load-tools/hey/run.sh $(SCENARIO)
+	@$(MAKE) -s _stop-server-internal
+
 _run-k6-bad: _start-server
 	@HOST=$(SERVER_HOST) bash load-tools/k6-bad/run.sh $(SCENARIO)
 	@$(MAKE) -s _stop-server-internal
 
 _run-k6-good: _start-server
 	@HOST=$(SERVER_HOST) bash load-tools/k6-good/run.sh $(SCENARIO)
+	@$(MAKE) -s _stop-server-internal
+
+_run-jmeter-bad: _start-server
+	@HOST=$(SERVER_HOST) bash load-tools/jmeter-bad/run.sh $(SCENARIO)
+	@$(MAKE) -s _stop-server-internal
+
+_run-jmeter-good: _start-server
+	@HOST=$(SERVER_HOST) bash load-tools/jmeter-good/run.sh $(SCENARIO)
 	@$(MAKE) -s _stop-server-internal
 
 _start-server:
@@ -192,7 +245,9 @@ publish-blog:
 
 clean: stop-server
 	rm -f $(SERVER_BIN) $(SERVER_LOG) $(SERVER_LOG).*
-	rm -rf results/*/ab results/*/vegeta results/*/wrk2 results/*/k6-bad results/*/k6-good
+	rm -rf results/*/ab results/*/wrk results/*/wrk2 results/*/hey \
+	       results/*/vegeta results/*/k6-bad results/*/k6-good \
+	       results/*/jmeter-bad results/*/jmeter-good
 
 # Removes the virtualenv too. Kept separate so `make clean` does not force
 # a re-install on every iteration.
