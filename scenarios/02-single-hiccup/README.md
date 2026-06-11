@@ -61,10 +61,13 @@ The structural lie of closed-loop benchmarks under a server slowdown:
   report a tail latency in the hundreds of milliseconds, reflecting the
   ~1 000 requests that *would have arrived* during the stall in a real
   open workload.
-- **At p99.9 and beyond:** all tools eventually surface the 1-second
-  stall, but only because the stall is so long relative to the total
-  sample count that it cannot be hidden any longer. Production users
-  hit the wall at p99, not p99.9.
+- **At p99.9 the gap widens** (~12–27 ms closed vs ~950 ms open): a
+  closed-loop tool records only one stalled sample per virtual user —
+  about ten for `ab` — far too few to lift even the 99.9th percentile.
+  The two groups reconverge only at p99.99, where the handful of
+  stalled samples finally outnumbers the percentile's population.
+  Production dashboards watch p99 and p99.9 — exactly where the lie
+  lives.
 
 This is the empirical illustration of the article's central claim.
 
@@ -85,7 +88,7 @@ fires at t=30 s relative to the start of *each* runner.
 | p50        | ~10–12 ms         | ~10 ms          |
 | p95        | ~12–15 ms         | ~10 ms          |
 | **p99**    | **~12–19 ms**     | **~400–450 ms** |
-| p99.9      | ~1 000 ms         | ~950 ms         |
+| **p99.9**  | **~12–27 ms**     | **~950 ms**     |
 | p99.99     | ~1 000 ms         | ~1 000 ms       |
 
 Numbers are illustrative; exact values depend on hardware and tool
